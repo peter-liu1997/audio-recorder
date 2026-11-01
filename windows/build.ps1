@@ -22,3 +22,6 @@ foreach ($name in @("meeting_assistant.py", "meeting_service.py", "meeting_core.
 Copy-Item (Join-Path $PSScriptRoot "meeting-assistant.cmd") (Join-Path $build "Release/meeting-assistant.cmd") -Force
 & (Join-Path $PSScriptRoot "smoke.ps1") -Exe $exe
 Write-Host "Built $exe and meeting-assistant.cmd"
+# Smoke checks deliberately run commands with nonzero exit codes. Report the
+# successful build explicitly instead of leaking a probe's LASTEXITCODE to CI.
+exit 0

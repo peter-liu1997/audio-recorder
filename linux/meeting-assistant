@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PREFIX=$(CDPATH= cd -- "$BIN_DIR/.." && pwd)
+export AUDIO_RECORDER_CLI="$BIN_DIR/audio-recorder"
+exec "${AUDIO_RECORDER_PYTHON:-python3}" "$PREFIX/lib/audio-recorder/gui/meeting_assistant.py" "$@"

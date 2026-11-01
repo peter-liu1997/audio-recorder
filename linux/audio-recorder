@@ -1,0 +1,619 @@
+#!/usr/bin/env python3
+"""Linux PulseAudio/PipeWire recording CLI with the shared agent JSON contract."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fcntl
+import json
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import uuid
+import wave
+
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
+RATE = 48000
+CHANNELS = 2
+FRAME_BYTES = 4
+MAX_WAV_BYTES = 0xFFFFFFFF - 36
+SCHEMA_VERSION = 1
+
+
+class CLIError(Exception):
+    def __init__(self, code: str, message: str, exit_code: int):
+        super().__init__(message)
+        self.code = code
+        self.exit_code = exit_code
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise CLIError("INVALID_ARGUMENT", message, 2)
+
+
+def now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def reply(command: str, data: dict | None = None, failure: CLIError | None = None) -> None:
+    if failure:
+        payload = {"schemaVersion": SCHEMA_VERSION, "ok": False, "command": command,
+                   "error": {"code": failure.code, "message": str(failure)}}
+    else:
+        payload = {"schemaVersion": SCHEMA_VERSION, "ok": True, "command": command, "data": data or {}}
+    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
+
+def tool(name: str) -> str:
+    path = shutil.which(name)
+    if not path:
+        raise CLIError("DEPENDENCY_MISSING", f"Required executable not found: {name}", 5)
+    return path
+
+
+def run_checked(args: list[str], error_code: str = "AUDIO_SERVER_UNAVAILABLE") -> str:
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=15, errors="replace")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise CLIError(error_code, f"Could not run {args[0]}: {exc}", 5) from exc
+    if result.returncode:
+        raise CLIError(error_code, (result.stderr or result.stdout).strip()[-500:] or f"{args[0]} failed", 5)
+    return result.stdout
+
+
+def pactl_json(kind: str) -> list[dict]:
+    raw = run_checked([tool("pactl"), "--format=json", "list", kind])
+    try:
+        result = json.loads(raw)
+        if not isinstance(result, list):
+            raise ValueError("not a list")
+        return result
+    except (ValueError, TypeError) as exc:
+        raise CLIError("AUDIO_SERVER_UNAVAILABLE", f"Invalid pactl JSON for {kind}", 5) from exc
+
+
+def default_name(kind: str) -> str:
+    return run_checked([tool("pactl"), f"get-default-{kind}"]).strip()
+
+
+def devices() -> list[dict]:
+    return [{"id": source["name"], "name": source.get("description", source["name"])}
+            for source in pactl_json("sources") if not str(source.get("name", "")).endswith(".monitor")]
+
+
+def apps() -> list[dict]:
+    result = []
+    for stream in pactl_json("sink-inputs"):
+        properties = stream.get("properties") or {}
+        result.append({
+            "id": int(stream["index"]), "name": properties.get("application.name", stream.get("name", "")),
+            "pid": properties.get("application.process.id"), "sink": int(stream["sink"]),
+        })
+    return result
+
+
+def select_app(query: str) -> dict:
+    candidates = apps()
+    if query.isdecimal():
+        exact = [item for item in candidates if str(item["id"]) == query]
+        if exact:
+            return exact[0]
+        matches = [item for item in candidates if str(item["pid"]) == query]
+    else:
+        matches = [item for item in candidates if item["name"].casefold() == query.casefold()]
+        if not matches:
+            matches = [item for item in candidates if query.casefold() in item["name"].casefold()]
+    if not matches:
+        raise CLIError("SOURCE_NOT_FOUND", f"No playing application matches {query!r}; run 'audio-recorder apps'", 5)
+    if len(matches) > 1:
+        raise CLIError("SOURCE_AMBIGUOUS", f"Multiple playback streams match {query!r}; use an ID from 'apps'", 5)
+    return matches[0]
+
+
+def monitor_for_sink(index: int | None) -> str:
+    sinks = pactl_json("sinks")
+    if index is None:
+        selected = default_name("sink")
+        matches = [sink for sink in sinks if sink.get("name") == selected]
+    else:
+        matches = [sink for sink in sinks if int(sink.get("index", -1)) == index]
+    if not matches:
+        raise CLIError("SOURCE_NOT_FOUND", "Output device for capture is unavailable", 5)
+    sink = matches[0]
+    monitor = sink.get("monitor_source")
+    if isinstance(monitor, str) and monitor and not monitor.isdecimal():
+        return monitor
+    return sink["name"] + ".monitor"
+
+
+def parse_record(args: list[str]) -> dict:
+    parser = Parser(prog="audio-recorder record", add_help=False)
+    parser.add_argument("--source", choices=("mic", "system", "both"), default="both")
+    parser.add_argument("--app")
+    parser.add_argument("--mic-device")
+    parser.add_argument("--output")
+    parser.add_argument("--duration", type=float)
+    parser.add_argument("--mic-gain", type=float, default=1.0)
+    parser.add_argument("--system-gain", type=float, default=1.0)
+    parser.add_argument("--keep-tracks", action="store_true")
+    parser.add_argument("--live-dir", help=argparse.SUPPRESS)
+    options = vars(parser.parse_args(args))
+    if options["duration"] is not None and not (0 < options["duration"] < float("inf")):
+        raise CLIError("INVALID_ARGUMENT", "--duration must be positive and finite", 2)
+    for gain in ("mic_gain", "system_gain"):
+        if not (0 <= options[gain] <= 4):
+            raise CLIError("INVALID_ARGUMENT", f"--{gain.replace('_', '-')} must be between 0 and 4", 2)
+    if options["app"] and options["source"] == "mic":
+        raise CLIError("INVALID_ARGUMENT", "--app requires system or both source", 2)
+    if options["mic_device"] and options["source"] == "system":
+        raise CLIError("INVALID_ARGUMENT", "--mic-device requires mic or both source", 2)
+    if not options["output"]:
+        options["output"] = f"recording-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}.wav"
+    options["output"] = str(Path(options["output"]).expanduser().resolve())
+    if Path(options["output"]).suffix.lower() != ".wav":
+        raise CLIError("INVALID_ARGUMENT", "--output must have a .wav extension", 2)
+    return options
+
+
+def capture_targets(options: dict) -> list[dict]:
+    targets = []
+    if options["source"] in ("mic", "both"):
+        selected = options["mic_device"] or default_name("source")
+        available = {item["id"] for item in devices()}
+        if selected not in available:
+            raise CLIError("SOURCE_NOT_FOUND", f"Microphone not found: {selected}", 5)
+        targets.append({"role": "microphone", "device": selected})
+    if options["source"] in ("system", "both"):
+        if options["app"]:
+            app = select_app(options["app"])
+            targets.append({"role": "system", "device": monitor_for_sink(app["sink"]),
+                            "monitorStream": app["id"]})
+        else:
+            targets.append({"role": "system", "device": monitor_for_sink(None)})
+    return targets
+
+
+class Store:
+    def __init__(self):
+        override = os.environ.get("AUDIO_RECORDER_STATE_DIR")
+        base = Path(override).expanduser() if override else Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "audio-recorder/sessions"
+        self.root = base.resolve()
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    def locked(self, operation):
+        with (self.root / ".lock").open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                return operation()
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def path(self, identifier: str) -> Path:
+        try:
+            return self.root / (str(uuid.UUID(identifier)) + ".json")
+        except ValueError as exc:
+            raise CLIError("INVALID_SESSION_ID", "Session ID must be a UUID", 2) from exc
+
+    def read(self, identifier: str) -> dict:
+        path = self.path(identifier)
+        if not path.is_file():
+            raise CLIError("SESSION_NOT_FOUND", f"Session not found: {identifier}", 4)
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def write(self, session: dict) -> None:
+        path = self.path(session["id"])
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.root, delete=False) as temp:
+            json.dump(session, temp, ensure_ascii=False, indent=2)
+            temp_path = Path(temp.name)
+        os.chmod(temp_path, 0o600)
+        os.replace(temp_path, path)
+
+    def refresh(self, session: dict) -> dict:
+        if session["state"] not in ("starting", "recording", "stopping"):
+            return session
+        pid = session.get("pid")
+        if pid:
+            try:
+                os.kill(pid, 0)
+                return session
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                return session
+        else:
+            created = dt.datetime.fromisoformat(session["createdAt"].replace("Z", "+00:00"))
+            if (dt.datetime.now(dt.timezone.utc) - created).total_seconds() < 60:
+                return session
+        session = dict(session, state="failed", endedAt=now(), error="Recorder process exited before finalization")
+        self.write(session)
+        return session
+
+    def list(self) -> list[dict]:
+        return self.locked(lambda: sorted(
+            [self.refresh(json.loads(path.read_text(encoding="utf-8")))
+             for path in self.root.glob("*.json") if self.is_session_file(path)],
+            key=lambda item: item["createdAt"], reverse=True))
+
+    @staticmethod
+    def is_session_file(path: Path) -> bool:
+        try:
+            uuid.UUID(path.stem)
+            return True
+        except ValueError:
+            return False
+
+    def get(self, identifier: str) -> dict:
+        return self.locked(lambda: self.refresh(self.read(identifier)))
+
+    def update(self, identifier: str, changes: dict) -> dict:
+        def operation():
+            current = self.read(identifier)
+            current.update(changes)
+            self.write(current)
+            return current
+        return self.locked(operation)
+
+    def create(self, session: dict) -> None:
+        def operation():
+            for path in self.root.glob("*.json"):
+                if not self.is_session_file(path):
+                    continue
+                current = self.refresh(json.loads(path.read_text(encoding="utf-8")))
+                if current["state"] in ("starting", "recording", "stopping"):
+                    raise CLIError("ALREADY_RECORDING", f"A recording is already active: {current['id']}", 4)
+            self.write(session)
+        self.locked(operation)
+
+
+class Track:
+    def __init__(self, target: dict, directory: Path, log):
+        self.target = target
+        self.path = directory / (target["role"] + ".raw")
+        args = [tool("parec"), "--raw", "--format=s16le", f"--rate={RATE}",
+                f"--channels={CHANNELS}", "--device=" + target["device"]]
+        if "monitorStream" in target:
+            args.append("--monitor-stream=" + str(target["monitorStream"]))
+        self.process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=log, start_new_session=True)
+        self.first_byte_at = None
+        self.bytes_written = 0
+        self.thread = threading.Thread(target=self.pump, daemon=True)
+        self.thread.start()
+
+    def pump(self):
+        with self.path.open("xb") as output:
+            while True:
+                data = self.process.stdout.read(16384)
+                if not data:
+                    break
+                if self.first_byte_at is None:
+                    self.first_byte_at = time.monotonic()
+                output.write(data)
+                self.bytes_written += len(data)
+
+    def stop(self):
+        if self.process.poll() is None:
+            self.process.send_signal(signal.SIGINT)
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait()
+        self.thread.join(timeout=5)
+
+
+def ffmpeg_wav(inputs: list[tuple[Path, float]], output: Path, gains: list[float],
+               duration: float | None) -> None:
+    command = [tool("ffmpeg"), "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+    for path, offset in inputs:
+        if offset > 0.001:
+            command += ["-itsoffset", f"{offset:.6f}"]
+        command += ["-f", "s16le", "-ar", str(RATE), "-ac", str(CHANNELS), "-i", str(path)]
+    if len(inputs) == 2:
+        filters = f"[0:a]volume={gains[0]}[mic];[1:a]volume={gains[1]}[sys];[mic][sys]amix=inputs=2:duration=longest:normalize=0[out]"
+        command += ["-filter_complex", filters, "-map", "[out]"]
+    else:
+        command += ["-af", f"volume={gains[0]}"]
+    if duration is not None:
+        command += ["-t", str(duration)]
+    command += ["-ar", str(RATE), "-ac", str(CHANNELS), "-c:a", "pcm_s16le", str(output)]
+    completed = subprocess.run(command, capture_output=True, text=True, errors="replace")
+    if completed.returncode:
+        raise CLIError("AUDIO_PROCESSING_FAILED", (completed.stderr or "FFmpeg failed").strip()[-700:], 6)
+
+
+def record(options: dict, should_stop=lambda: False, on_started=lambda: None) -> dict:
+    tool("parec")
+    tool("ffmpeg")
+    output = Path(options["output"])
+    targets = capture_targets(options)
+    if output.exists():
+        raise CLIError("OUTPUT_EXISTS", f"Output already exists: {output}", 4)
+    keep_paths = [output.with_suffix(f".{target['role']}.wav") for target in targets] if options["keep_tracks"] else []
+    if any(path.exists() for path in keep_paths):
+        raise CLIError("OUTPUT_EXISTS", "A separate track output already exists", 4)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    raw_directory = Path(options["live_dir"]).expanduser().resolve() if options["live_dir"] else None
+    if raw_directory:
+        raw_directory.mkdir(parents=True, exist_ok=True)
+    if raw_directory and any((raw_directory / (target["role"] + ".raw")).exists() for target in targets):
+        raise CLIError("OUTPUT_EXISTS", "A live raw track already exists", 4)
+    directory = Path(tempfile.mkdtemp(prefix=".audio-recorder-", dir=output.parent))
+    raw_directory = raw_directory or directory
+    tracks = []
+    stop_flag = threading.Event()
+    previous = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, lambda *_: stop_flag.set())
+    spawned_at = time.monotonic()
+    capture_started_at = None
+    try:
+        with (directory / "capture.log").open("w", encoding="utf-8") as log:
+            for target in targets:
+                tracks.append(Track(target, raw_directory, log))
+            while not stop_flag.is_set() and not should_stop():
+                if capture_started_at is None and all(track.first_byte_at is not None for track in tracks):
+                    capture_started_at = min(track.first_byte_at for track in tracks)
+                    on_started()
+                if capture_started_at is None and time.monotonic() - spawned_at > 10:
+                    raise CLIError("CAPTURE_FAILED", f"No audio buffers arrived; see {directory / 'capture.log'}", 6)
+                if (capture_started_at is not None and options["duration"] is not None
+                        and time.monotonic() - capture_started_at >= options["duration"]):
+                    break
+                for track in tracks:
+                    if track.process.poll() is not None:
+                        raise CLIError("CAPTURE_FAILED", f"{track.target['role']} capture exited early; see {directory / 'capture.log'}", 6)
+                    if track.bytes_written > MAX_WAV_BYTES:
+                        raise CLIError("RECORDING_TOO_LONG", "WAV data exceeded 4 GiB; raw tracks retained", 6)
+                time.sleep(0.1)
+        for track in tracks:
+            track.stop()
+        if any(track.bytes_written == 0 for track in tracks):
+            raise CLIError("CAPTURE_FAILED", f"One capture track is empty; raw tracks retained in {directory}", 6)
+        origin = min(track.first_byte_at for track in tracks)
+        inputs = [(track.path, track.first_byte_at - origin) for track in tracks]
+        gains = [options["mic_gain"] if track.target["role"] == "microphone" else options["system_gain"] for track in tracks]
+        temp_output = directory / "final.wav"
+        ffmpeg_wav(inputs, temp_output, gains, options["duration"])
+        for track, path in zip(tracks, keep_paths):
+            ffmpeg_wav([(track.path, 0)], path, [1.0], options["duration"])
+        os.replace(temp_output, output)
+        with wave.open(str(output), "rb") as wav:
+            duration = wav.getnframes() / wav.getframerate()
+        result = {"output": str(output), "durationSeconds": round(duration, 3),
+                  "tracks": [str(path) for path in keep_paths], "sampleRate": RATE,
+                  "channels": CHANNELS, "format": "wav-pcm16",
+                  "clockAlignment": "first-delivered-buffer"}
+        shutil.rmtree(directory)
+        return result
+    except CLIError:
+        raise
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CLIError("CAPTURE_FAILED", f"Capture failed: {exc}; raw tracks retained in {directory}", 6) from exc
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        for track in tracks:
+            track.stop()
+
+
+def newest_or_active(sessions: list[dict], active_only: bool) -> dict | None:
+    for session in sessions:
+        if session["state"] in ("starting", "recording", "stopping"):
+            return session
+    return None if active_only else (sessions[0] if sessions else None)
+
+
+def worker(identifier: str) -> None:
+    store = Store()
+    session = store.get(identifier)
+    options = session["options"]
+    try:
+        result = record(options, should_stop=lambda: store.get(identifier)["state"] == "stopping",
+                        on_started=lambda: store.update(identifier, {"state": "recording", "startedAt": now()}))
+        store.update(identifier, {"state": "done", "endedAt": now(), "durationSeconds": result["durationSeconds"],
+                                  "tracks": result["tracks"]})
+    except Exception as exc:
+        store.update(identifier, {"state": "failed", "endedAt": now(), "error": str(exc)})
+
+
+def parse_id(args: list[str]) -> str | None:
+    if not args:
+        return None
+    if len(args) != 2 or args[0] != "--id":
+        raise CLIError("INVALID_ARGUMENT", "Expected --id UUID", 2)
+    try:
+        return str(uuid.UUID(args[1]))
+    except ValueError as exc:
+        raise CLIError("INVALID_SESSION_ID", "Session ID must be a UUID", 2) from exc
+
+
+def start(args: list[str]) -> dict:
+    options = parse_record(args)
+    if options["live_dir"]:
+        raise CLIError("INVALID_ARGUMENT", "--live-dir is only valid with foreground record", 2)
+    tool("parec")
+    tool("ffmpeg")
+    capture_targets(options)
+    if Path(options["output"]).exists():
+        raise CLIError("OUTPUT_EXISTS", "Output already exists", 4)
+    store = Store()
+    identifier = str(uuid.uuid4())
+    log_path = store.root / (identifier + ".log")
+    session = {"schemaVersion": SCHEMA_VERSION, "id": identifier, "state": "starting",
+               "output": options["output"], "source": options["source"], "app": options["app"],
+               "createdAt": now(), "logPath": str(log_path), "options": options}
+    store.create(session)
+    try:
+        with log_path.open("w", encoding="utf-8") as log:
+            process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "__worker", identifier],
+                                       stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+    except OSError as exc:
+        store.update(identifier, {"state": "failed", "endedAt": now(), "error": str(exc)})
+        raise
+    session = store.update(identifier, {"pid": process.pid})
+    return {"session": session}
+
+
+def stop(args: list[str]) -> dict:
+    identifier = parse_id(args)
+    store = Store()
+    session = store.get(identifier) if identifier else newest_or_active(store.list(), True)
+    if not session:
+        raise CLIError("NO_ACTIVE_SESSION", "No active recording", 4)
+    if session["state"] == "failed":
+        raise CLIError("CAPTURE_FAILED", session.get("error", "Recording failed"), 6)
+    if session["state"] == "done":
+        return {"session": session}
+    store.update(session["id"], {"state": "stopping"})
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        current = store.get(session["id"])
+        if current["state"] == "done":
+            return {"session": current}
+        if current["state"] == "failed":
+            raise CLIError("CAPTURE_FAILED", current.get("error", "Recording failed"), 6)
+        time.sleep(0.15)
+    raise CLIError("STOP_TIMEOUT", "Stop requested; check status", 6)
+
+
+HELP = """audio-recorder — Linux microphone, system/application audio, and transcription
+
+Usage:
+  audio-recorder doctor|devices|apps|list [--json]
+  audio-recorder record|start [--source mic|system|both] [--app NAME|ID|PID]
+                       [--mic-device ID] [--output FILE.wav] [--duration SECONDS]
+                       [--mic-gain 0..4] [--system-gain 0..4] [--keep-tracks] [--json]
+  audio-recorder status|stop [--id UUID] [--json]
+  audio-recorder transcribe --input FILE [--backend local|local-gguf|qwen] ... [--json]
+  audio-recorder live [record and model options] [--json]
+
+Application capture selects one active PulseAudio sink input; use 'apps' for its ID.
+Recording requires pactl, parec, and ffmpeg with a reachable PulseAudio-compatible server.
+Transcription requires Python 3, FFmpeg, and the selected model runtime.
+"""
+
+
+def locate_transcriber() -> Path:
+    candidates = [Path(__file__).resolve().parent / "transcribe.py",
+                  Path(__file__).resolve().parents[1] / "scripts" / "transcribe.py",
+                  Path(__file__).resolve().parent.parent / "lib/audio-recorder/transcribe.py",
+                  Path.home() / ".local/share/audio-recorder/transcribe.py"]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise CLIError("DEPENDENCY_MISSING", "transcribe.py not found beside the Linux CLI", 5)
+
+
+def locate_live() -> Path:
+    candidates = [Path(__file__).resolve().parent / "live.py",
+                  Path(__file__).resolve().parents[1] / "scripts" / "live.py",
+                  Path(__file__).resolve().parent.parent / "lib/audio-recorder/live.py"]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise CLIError("DEPENDENCY_MISSING", "live.py not found beside the Linux CLI", 5)
+
+
+def dispatch(command: str, args: list[str], json_mode: bool):
+    if command in ("help", "--help", "-h"):
+        if json_mode: reply("help", {"text": HELP})
+        else: print(HELP)
+    elif command == "doctor":
+        if args: raise CLIError("INVALID_ARGUMENT", "doctor takes no options", 2)
+        found = {name: shutil.which(name) is not None for name in ("pactl", "parec", "ffmpeg")}
+        server = "unavailable"
+        if found["pactl"]:
+            try:
+                info = run_checked([tool("pactl"), "info"])
+                server = next((line.partition(":")[2].strip() for line in info.splitlines()
+                               if line.startswith("Server Name:")), "available")
+            except CLIError:
+                pass
+        data = {"platform": "linux", "audioServer": server, "dependencies": found,
+                "applicationCapture": "parec-monitor-stream" if found["parec"] else "unavailable"}
+        if json_mode: reply("doctor", data)
+        else: print(json.dumps(data, ensure_ascii=False, indent=2))
+    elif command == "devices":
+        if args: raise CLIError("INVALID_ARGUMENT", "devices takes no options", 2)
+        data = {"devices": devices()}
+        if json_mode: reply(command, data)
+        else:
+            for item in data["devices"]: print(item["id"], item["name"], sep="\t")
+    elif command == "apps":
+        if args: raise CLIError("INVALID_ARGUMENT", "apps takes no options", 2)
+        data = {"apps": apps()}
+        if json_mode: reply(command, data)
+        else:
+            for item in data["apps"]: print(item["id"], item["pid"], item["name"], sep="\t")
+    elif command == "record":
+        result = record(parse_record(args))
+        if json_mode: reply(command, result)
+        else: print("Saved", result["output"])
+    elif command == "start":
+        result = start(args)
+        if json_mode: reply(command, result)
+        else: print("Started", result["session"]["id"])
+    elif command == "status":
+        identifier = parse_id(args)
+        store = Store()
+        session = store.get(identifier) if identifier else newest_or_active(store.list(), False)
+        if json_mode: reply(command, {"session": session})
+        else: print(json.dumps(session, ensure_ascii=False, indent=2) if session else "No sessions")
+    elif command == "stop":
+        result = stop(args)
+        if json_mode: reply(command, result)
+        else: print("Stopped", result["session"]["output"])
+    elif command == "list":
+        if args: raise CLIError("INVALID_ARGUMENT", "list takes no options", 2)
+        sessions = Store().list()
+        if json_mode: reply(command, {"sessions": sessions})
+        else:
+            for session in sessions: print(session["id"], session["state"], session["output"], sep="\t")
+    elif command == "transcribe":
+        script = locate_transcriber()
+        os.execv(sys.executable, [sys.executable, str(script)] + args + (["--json"] if json_mode else []))
+    elif command == "live":
+        script = locate_live()
+        os.execv(sys.executable, [sys.executable, str(script), "--recorder-cli", str(Path(__file__).resolve())]
+                 + args + (["--json"] if json_mode else []))
+    elif command == "__worker":
+        if len(args) != 1: raise CLIError("INVALID_ARGUMENT", "Invalid worker invocation", 2)
+        worker(args[0])
+    else:
+        raise CLIError("INVALID_ARGUMENT", f"Unknown command: {command}", 2)
+
+
+def main(argv: list[str]) -> int:
+    json_mode = "--json" in argv
+    argv = [item for item in argv if item != "--json"]
+    command = argv[0] if argv else "help"
+    try:
+        dispatch(command, argv[1:], json_mode)
+        return 0
+    except CLIError as exc:
+        if json_mode: reply(command, failure=exc)
+        else: print(f"audio-recorder: {exc}", file=sys.stderr)
+        return exc.exit_code
+    except OSError as exc:
+        wrapped = CLIError("IO_ERROR", str(exc), 7)
+        if json_mode: reply(command, failure=wrapped)
+        else: print(f"audio-recorder: {exc}", file=sys.stderr)
+        return 7
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

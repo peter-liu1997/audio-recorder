@@ -1,0 +1,325 @@
+{
+  "architecture": "ARM64",
+  "os": "Microsoft Windows NT 10.0.26200.0",
+  "results": [
+    {
+      "detail": {
+        "schemaVersion": 1,
+        "ok": true,
+        "command": "doctor",
+        "data": {
+          "windowsBuild": 26200,
+          "microphone": "available",
+          "systemAudio": "available",
+          "applicationLoopback": true
+        }
+      },
+      "status": "passed",
+      "name": "doctor"
+    },
+    {
+      "detail": {
+        "schemaVersion": 1,
+        "ok": true,
+        "command": "devices",
+        "data": {
+          "devices": [
+            {
+              "id": "{0.0.1.00000000}.{0d40b458-fc1d-46bf-ba16-f76605d83bc1}",
+              "name": "绾胯矾杈撳叆 (High Definition Audio Device)"
+            }
+          ]
+        }
+      },
+      "status": "passed",
+      "name": "devices"
+    },
+    {
+      "detail": {
+        "schemaVersion": 1,
+        "ok": true,
+        "command": "apps",
+        "data": {
+          "appCount": 142,
+          "appsOmittedForPrivacy": true
+        }
+      },
+      "status": "passed",
+      "name": "apps"
+    },
+    {
+      "detail": {
+        "schemaVersion": 1,
+        "ok": true,
+        "command": "__selftest",
+        "data": {
+          "audioMix": "passed"
+        }
+      },
+      "status": "passed",
+      "name": "synthetic-mixing"
+    },
+    {
+      "detail": {
+        "schemaVersion": 1,
+        "ok": false,
+        "command": "record",
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "message": "--source must be mic, system, or both"
+        }
+      },
+      "status": "passed",
+      "name": "invalid-argument"
+    },
+    {
+      "detail": {
+        "schemaVersion": 1,
+        "ok": true,
+        "command": "status",
+        "data": {
+          "session": null
+        }
+      },
+      "status": "passed",
+      "name": "empty-state"
+    },
+    {
+      "detail": {
+        "schemaVersion": 1,
+        "ok": false,
+        "command": "stop",
+        "error": {
+          "code": "NO_ACTIVE_SESSION",
+          "message": "No active recording"
+        }
+      },
+      "status": "passed",
+      "name": "stop-without-session"
+    },
+    {
+      "detail": {
+        "response": {
+          "schemaVersion": 1,
+          "ok": true,
+          "command": "record",
+          "data": {
+            "output": "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\system.wav",
+            "durationSeconds": 3,
+            "sampleRate": 48000,
+            "channels": 2,
+            "format": "wav-pcm16",
+            "tracks": []
+          }
+        },
+        "wav": {
+          "bytes": 576044,
+          "sampleRate": 48000,
+          "seconds": 3,
+          "channels": 2,
+          "peak": 10001,
+          "file": "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\system.wav"
+        }
+      },
+      "status": "passed",
+      "name": "system-loopback"
+    },
+    {
+      "detail": {
+        "response": {
+          "schemaVersion": 1,
+          "ok": true,
+          "command": "record",
+          "data": {
+            "output": "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\app.wav",
+            "durationSeconds": 3,
+            "sampleRate": 48000,
+            "channels": 2,
+            "format": "wav-pcm16",
+            "tracks": []
+          }
+        },
+        "wav": {
+          "bytes": 576044,
+          "sampleRate": 48000,
+          "seconds": 3,
+          "channels": 2,
+          "peak": 10001,
+          "file": "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\app.wav"
+        }
+      },
+      "status": "passed",
+      "name": "application-loopback"
+    },
+    {
+      "detail": {
+        "response": {
+          "schemaVersion": 1,
+          "ok": true,
+          "command": "record",
+          "data": {
+            "output": "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\mic.wav",
+            "durationSeconds": 2,
+            "sampleRate": 48000,
+            "channels": 2,
+            "format": "wav-pcm16",
+            "tracks": []
+          }
+        },
+        "wav": {
+          "bytes": 384044,
+          "sampleRate": 48000,
+          "seconds": 2,
+          "channels": 2,
+          "peak": 105,
+          "file": "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\mic.wav"
+        }
+      },
+      "status": "passed",
+      "name": "microphone-input"
+    },
+    {
+      "detail": {
+        "mixed": {
+          "bytes": 384044,
+          "sampleRate": 48000,
+          "seconds": 2,
+          "channels": 2,
+          "peak": 10112,
+          "file": "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\both.wav"
+        },
+        "mic": {
+          "bytes": 384044,
+          "sampleRate": 48000,
+          "seconds": 2,
+          "channels": 2,
+          "peak": 132,
+          "file": "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\both.microphone.wav"
+        },
+        "system": {
+          "bytes": 384044,
+          "sampleRate": 48000,
+          "seconds": 2,
+          "channels": 2,
+          "peak": 10001,
+          "file": "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\both.system.wav"
+        },
+        "response": {
+          "schemaVersion": 1,
+          "ok": true,
+          "command": "record",
+          "data": {
+            "output": "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\both.wav",
+            "durationSeconds": 2,
+            "sampleRate": 48000,
+            "channels": 2,
+            "format": "wav-pcm16",
+            "tracks": [
+              "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\both.microphone.wav",
+              "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\both.system.wav"
+            ]
+          }
+        }
+      },
+      "status": "passed",
+      "name": "mixed-separate-tracks"
+    },
+    {
+      "detail": {
+        "status": {
+          "schemaVersion": 1,
+          "ok": true,
+          "command": "status",
+          "data": {
+            "session": {
+              "schemaVersion": 1,
+              "id": "CF167A25-8172-4FAF-9F78-8EF50C77BF05",
+              "state": "recording",
+              "output": "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\background.wav",
+              "source": "system",
+              "createdAt": "2026-11-01T05:00:15Z",
+              "logPath": "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\sessions\\CF167A25-8172-4FAF-9F78-8EF50C77BF05.log",
+              "pid": 6952,
+              "startedAt": "2026-11-01T05:00:15Z",
+              "tracks": []
+            }
+          }
+        },
+        "stop": {
+          "schemaVersion": 1,
+          "ok": true,
+          "command": "stop",
+          "data": {
+            "session": {
+              "schemaVersion": 1,
+              "id": "CF167A25-8172-4FAF-9F78-8EF50C77BF05",
+              "state": "done",
+              "output": "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\background.wav",
+              "source": "system",
+              "createdAt": "2026-11-01T05:00:15Z",
+              "logPath": "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\sessions\\CF167A25-8172-4FAF-9F78-8EF50C77BF05.log",
+              "pid": 6952,
+              "startedAt": "2026-11-01T05:00:15Z",
+              "endedAt": "2026-11-01T05:00:17Z",
+              "durationSeconds": 2.13729166667,
+              "tracks": []
+            }
+          }
+        },
+        "wav": {
+          "bytes": 410404,
+          "sampleRate": 48000,
+          "seconds": 2.1372916666666666,
+          "channels": 2,
+          "peak": 10001,
+          "file": "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\background.wav"
+        },
+        "start": {
+          "schemaVersion": 1,
+          "ok": true,
+          "command": "start",
+          "data": {
+            "session": {
+              "schemaVersion": 1,
+              "id": "CF167A25-8172-4FAF-9F78-8EF50C77BF05",
+              "state": "recording",
+              "output": "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\background.wav",
+              "source": "system",
+              "createdAt": "2026-11-01T05:00:15Z",
+              "logPath": "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\sessions\\CF167A25-8172-4FAF-9F78-8EF50C77BF05.log",
+              "pid": 6952,
+              "startedAt": "2026-11-01T05:00:15Z",
+              "tracks": []
+            }
+          }
+        }
+      },
+      "status": "passed",
+      "name": "background-start-status-stop"
+    },
+    {
+      "detail": {
+        "schemaVersion": 1,
+        "ok": false,
+        "command": "record",
+        "error": {
+          "code": "OUTPUT_EXISTS",
+          "message": "Output already exists: C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST\\system.wav"
+        }
+      },
+      "status": "passed",
+      "name": "refuse-overwrite"
+    },
+    {
+      "detail": {
+        "launcher": "",
+        "gui": "Requires Python with Tkinter; UI acceptance remains separate",
+        "python": "C:\\Users\\WindowsUser\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe"
+      },
+      "status": "passed",
+      "name": "python-gui-dependency"
+    }
+  ],
+  "work": "C:\\Users\\WindowsUser\\AppData\\Local\\Temp\\audio-recorder-functional-TEST",
+  "publicationNote": "Public report: local usernames and temporary paths normalized; process enumeration omitted."
+}

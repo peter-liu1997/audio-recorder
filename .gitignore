@@ -1,0 +1,17 @@
+.build/
+.build-cache/
+.cache/
+dist/
+windows/build/
+*.wav
+*.caf
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+.env.*
+!.env.example

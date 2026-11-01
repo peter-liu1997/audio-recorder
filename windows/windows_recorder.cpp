@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <audioclient.h>
 #include "loopback_compat.h"
+#include <propkeydef.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <mmdeviceapi.h>
 #include <objbase.h>
